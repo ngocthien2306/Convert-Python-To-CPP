@@ -1,0 +1,33 @@
+// copy from https://github.com/DefTruth/lite.ai.toolkit/blob/main/lite/ort/core/ort_config.h
+
+#ifndef LITE_AI_ORT_CORE_ORT_CONFIG_H
+#define LITE_AI_ORT_CORE_ORT_CONFIG_H
+
+#include "ort_defs.h"
+#include "lite.ai.headers.h"
+
+#ifdef ENABLE_ONNXRUNTIME
+#include "onnxruntime_cxx_api.h"
+#endif
+
+inline static std::string OrtCompatiableGetInputName(size_t index, OrtAllocator* allocator,
+    Ort::Session* ort_session) {
+#if ORT_API_VERSION >= 14
+    return std::string(ort_session->GetInputNameAllocated(index, allocator).get());
+#else  
+    return std::string(ort_session->GetInputName(i, allocator));
+#endif
+}
+
+inline static std::string OrtCompatiableGetOutputName(size_t index, OrtAllocator* allocator,
+    Ort::Session* ort_session) {
+#if ORT_API_VERSION >= 14
+    return std::string(ort_session->GetOutputNameAllocated(index, allocator).get());
+#else  
+    return std::string(ort_session->GetOutputName(i, allocator));
+#endif
+}
+
+namespace core {}
+
+#endif //LITE_AI_ORT_CORE_ORT_CONFIG_H
