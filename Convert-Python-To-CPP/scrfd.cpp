@@ -40,30 +40,6 @@ void SCRFD::_init_vars()
 
 }
 
-
-Ort::Value SCRFD::preprocessing(const cv::Mat& mat_rs)
-{
-    std::vector<int> input_size = { mat_rs.rows, mat_rs.cols };
-
-    cv::Mat mat_cp = mat_rs.clone();
-
-    cv::cvtColor(mat_cp, mat_cp, cv::COLOR_BGR2RGB);
-
-    // normalize image
-    if (mat_cp.type() != CV_32FC3) mat_cp.convertTo(mat_cp, CV_32FC3);
-    for (unsigned int i = 0; i < mat_cp.rows; ++i) {
-        cv::Vec3f* p = mat_cp.ptr<cv::Vec3f>(i);
-        for (unsigned int j = 0; j < mat_cp.cols; ++j) {
-            p[j][0] = (p[j][0] - mean_vals[0]) * scale_vals[0];
-            p[j][1] = (p[j][1] - mean_vals[1]) * scale_vals[1];
-            p[j][2] = (p[j][2] - mean_vals[2]) * scale_vals[2];
-        }
-    }
-    return ortcv::utils::transform::create_tensor(
-        mat_cp, input_node_dims, memory_info_handler,
-        input_values_handler, ortcv::utils::transform::CHW);
-}
-
 void SCRFD::forward(cv::Mat mat_rs, const SCRFDScaleParams& scale_params, vector<types::BoxfWithLandmarks> &bbox_kps_collection, double score_threshold, float img_height, float img_width) {
 
     cv::Mat mat_cp = mat_rs.clone();
@@ -102,10 +78,35 @@ void SCRFD::forward(cv::Mat mat_rs, const SCRFDScaleParams& scale_params, vector
     // generate center points.
     const float input_height = static_cast<float>(input_node_dims.at(2)); // e.g 640
     const float input_width = static_cast<float>(input_node_dims.at(3)); // e.g 640
-    this->generate_points(input_height, input_width);
 
+    if (center_points_is_update) return;
+    // 8, 16, 32
+    for (auto stride : feat_stride_fpn)
+    {
+        unsigned int num_grid_w = input_width / stride;
+        unsigned int num_grid_h = input_height / stride;
+        // y
+        for (unsigned int i = 0; i < num_grid_h; ++i)
+        {
+            // x
+            for (unsigned int j = 0; j < num_grid_w; ++j)
+            {
+                // num_anchors, col major
+                for (unsigned int k = 0; k < num_anchors; ++k)
+                {
+                    SCRFDPoint point;
+                    point.cx = (float)j;
+                    point.cy = (float)i;
+                    point.stride = (float)stride;
+                    center_points[stride].push_back(point);
+                }
+
+            }
+        }
+    }
+
+    // center_points_is_update = true;
     bbox_kps_collection.clear();
-    
 
     if (use_kps)
     {
@@ -114,32 +115,27 @@ void SCRFD::forward(cv::Mat mat_rs, const SCRFDScaleParams& scale_params, vector
         Ort::Value& kps_32 = output_tensors.at(8);  // e.g [1,800,10]
 
         // level 8 & 16 & 32 with kps
-        this->generate_bboxes_kps_single_stride(scale_params, score_8, bbox_8, kps_8, 8, score_threshold,
+        this->distance2kps(scale_params, score_8, bbox_8, kps_8, 8, score_threshold,
             img_height, img_width, bbox_kps_collection, "default");
-        this->generate_bboxes_kps_single_stride(scale_params, score_16, bbox_16, kps_16, 16, score_threshold,
+        this->distance2kps(scale_params, score_16, bbox_16, kps_16, 16, score_threshold,
             img_height, img_width, bbox_kps_collection, "default");
-        this->generate_bboxes_kps_single_stride(scale_params, score_32, bbox_32, kps_32, 32, score_threshold,
+        this->distance2kps(scale_params, score_32, bbox_32, kps_32, 32, score_threshold,
             img_height, img_width, bbox_kps_collection, "default");
     } // no kps
     else
     {
         // level 8 & 16 & 32
-        this->generate_bboxes_single_stride(scale_params, score_8, bbox_8, 8, score_threshold,
+        this->distance2bbox(scale_params, score_8, bbox_8, 8, score_threshold,
             img_height, img_width, bbox_kps_collection);
-        this->generate_bboxes_single_stride(scale_params, score_16, bbox_16, 16, score_threshold,
+        this->distance2bbox(scale_params, score_16, bbox_16, 16, score_threshold,
             img_height, img_width, bbox_kps_collection);
-        this->generate_bboxes_single_stride(scale_params, score_32, bbox_32, 32, score_threshold,
+        this->distance2bbox(scale_params, score_32, bbox_32, 32, score_threshold,
             img_height, img_width, bbox_kps_collection);
     }
-
-    #if LITEORT_DEBUG
-        std::cout << "generate_bboxes_kps num: " << bbox_kps_collection.size() << "\n";
-    #endif
-
 }
 
 
-void SCRFD::detect2(cv::Mat mat, vector<types::BoxfWithLandmarks>& detected_boxes_kps, double score_threshold, const int max_nms, const string metric, const double iou_threshold, const int topk) {
+void SCRFD::detect(cv::Mat mat, vector<types::BoxfWithLandmarks>& detected_boxes_kps, double score_threshold, const int max_nms, const string metric, const double iou_threshold, const int topk) {
     cv::Mat mat_rs;
     SCRFDScaleParams scale_params;
     const int target_height = (int)input_node_dims.at(2);
@@ -179,150 +175,10 @@ void SCRFD::detect2(cv::Mat mat, vector<types::BoxfWithLandmarks>& detected_boxe
 
     this->forward(mat_rs, scale_params, bbox_kps_collection, score_threshold, img_height, img_width);
     this->nms(bbox_kps_collection, detected_boxes_kps, iou_threshold, topk);
-
-
-
-}
-
-void SCRFD::detect(cv::Mat mat, vector<types::BoxfWithLandmarks>& detected_boxes_kps, double nms_thresh, const int max_nms, const string metric, const double iou_threshold, const int topk) {
-    cv::Mat mat_rs;
-    SCRFDScaleParams scale_params;
-    const int target_height = (int)input_node_dims.at(2);
-    const int target_width = (int)input_node_dims.at(3);
-
-    if (mat.empty()) return;
-    int img_height = static_cast<int>(mat.rows);
-    int img_width = static_cast<int>(mat.cols);
-
-    mat_rs = cv::Mat(target_height, target_width, CV_8UC3,
-        cv::Scalar(0, 0, 0));
-    // scale ratio (new / old) new_shape(h,w)
-    float w_r = (float)target_width / (float)img_width;
-    float h_r = (float)target_height / (float)img_height;
-    float r = std::min(w_r, h_r);
-    // compute padding
-    int new_unpad_w = static_cast<int>((float)img_width * r); // floor
-    int new_unpad_h = static_cast<int>((float)img_height * r); // floor
-    int pad_w = target_width - new_unpad_w; // >=0
-    int pad_h = target_height - new_unpad_h; // >=0
-
-    int dw = pad_w / 2;
-    int dh = pad_h / 2;
-
-    // resize with unscaling
-    cv::Mat new_unpad_mat;
-    cv::resize(mat, new_unpad_mat, cv::Size(new_unpad_w, new_unpad_h));
-    new_unpad_mat.copyTo(mat_rs(cv::Rect(dw, dh, new_unpad_w, new_unpad_h)));
-
-    // record scale params.
-    scale_params.ratio = r;
-    scale_params.dw = dw;
-    scale_params.dh = dh;
-    scale_params.flag = true;
-
-
-    Ort::Value input_tensor = this->preprocessing(mat_rs);
-
-    auto output_tensors = ort_session->Run(
-        Ort::RunOptions{ nullptr }, input_node_names.data(),
-        &input_tensor, 1, output_node_names.data(), num_outputs
-    );
-
-    std::vector<types::BoxfWithLandmarks> bbox_kps_collection;
-    this->generate_bboxes_kps(scale_params, bbox_kps_collection, output_tensors,
-        nms_thresh, img_height, img_width);
-
-    this->nms(bbox_kps_collection, detected_boxes_kps, iou_threshold, topk);
-
 }
 
 
-void SCRFD::generate_points(const int target_height, const int target_width)
-{
-    if (center_points_is_update) return;
-    // 8, 16, 32
-    for (auto stride : feat_stride_fpn)
-    {
-        unsigned int num_grid_w = target_width / stride;
-        unsigned int num_grid_h = target_height / stride;
-        // y
-        for (unsigned int i = 0; i < num_grid_h; ++i)
-        {
-            // x
-            for (unsigned int j = 0; j < num_grid_w; ++j)
-            {
-                // num_anchors, col major
-                for (unsigned int k = 0; k < num_anchors; ++k)
-                {
-                    SCRFDPoint point;
-                    point.cx = (float)j;
-                    point.cy = (float)i;
-                    point.stride = (float)stride;
-                    center_points[stride].push_back(point);
-                }
-
-            }
-        }
-    }
-
-    center_points_is_update = true;
-}
-
-
-
-void SCRFD::generate_bboxes_kps(const SCRFDScaleParams& scale_params,
-    std::vector<types::BoxfWithLandmarks>& bbox_kps_collection,
-    std::vector<Ort::Value>& output_tensors,
-    float score_threshold,
-    float img_height,
-    float img_width)
-{
-    // score_8, score_16, score_32, bbox_8, bbox_16, bbox_32
-    Ort::Value& score_8 = output_tensors.at(0);  // e.g [1,12800,1]
-    Ort::Value& score_16 = output_tensors.at(1); // e.g [1,3200,1]
-    Ort::Value& score_32 = output_tensors.at(2); // e.g [1,800,1]
-    Ort::Value& bbox_8 = output_tensors.at(3);   // e.g [1,12800,4]
-    Ort::Value& bbox_16 = output_tensors.at(4);  // e.g [1,3200,4]
-    Ort::Value& bbox_32 = output_tensors.at(5);  // e.g [1,800,4]
-
-    // generate center points.
-    const float input_height = static_cast<float>(input_node_dims.at(2)); // e.g 640
-    const float input_width = static_cast<float>(input_node_dims.at(3)); // e.g 640
-    this->generate_points(input_height, input_width);
-
-    bbox_kps_collection.clear();
-
-    if (use_kps)
-    {
-        Ort::Value& kps_8 = output_tensors.at(6);   // e.g [1,12800,10]
-        Ort::Value& kps_16 = output_tensors.at(7);  // e.g [1,3200,10]
-        Ort::Value& kps_32 = output_tensors.at(8);  // e.g [1,800,10]
-
-        // level 8 & 16 & 32 with kps
-        this->generate_bboxes_kps_single_stride(scale_params, score_8, bbox_8, kps_8, 8, score_threshold,
-            img_height, img_width, bbox_kps_collection, "");
-        this->generate_bboxes_kps_single_stride(scale_params, score_16, bbox_16, kps_16, 16, score_threshold,
-            img_height, img_width, bbox_kps_collection, "");
-        this->generate_bboxes_kps_single_stride(scale_params, score_32, bbox_32, kps_32, 32, score_threshold,
-            img_height, img_width, bbox_kps_collection, "");
-    } // no kps
-    else
-    {
-        // level 8 & 16 & 32
-        this->generate_bboxes_single_stride(scale_params, score_8, bbox_8, 8, score_threshold,
-            img_height, img_width, bbox_kps_collection);
-        this->generate_bboxes_single_stride(scale_params, score_16, bbox_16, 16, score_threshold,
-            img_height, img_width, bbox_kps_collection);
-        this->generate_bboxes_single_stride(scale_params, score_32, bbox_32, 32, score_threshold,
-            img_height, img_width, bbox_kps_collection);
-    }
-
-#if LITEORT_DEBUG
-    std::cout << "generate_bboxes_kps num: " << bbox_kps_collection.size() << "\n";
-#endif
-}
-
-void SCRFD::generate_bboxes_single_stride(
+void SCRFD::distance2bbox(
     const SCRFDScaleParams& scale_params, Ort::Value& score_pred, Ort::Value& bbox_pred,
     unsigned int stride, float score_threshold, float img_height, float img_width,
     std::vector<types::BoxfWithLandmarks>& bbox_kps_collection)
@@ -392,7 +248,7 @@ void SCRFD::generate_bboxes_single_stride(
     }
 }
 
-void SCRFD::generate_bboxes_kps_single_stride(
+void SCRFD::distance2kps(
     const SCRFDScaleParams& scale_params, Ort::Value& score_pred, Ort::Value& bbox_pred,
     Ort::Value& kps_pred, unsigned int stride, float score_threshold, float img_height,
     float img_width, std::vector<types::BoxfWithLandmarks>& bbox_kps_collection, string metric)
@@ -530,66 +386,3 @@ void SCRFD::nms(vector<types::BoxfWithLandmarks>& input,
             break;
     }
 }
-
-
-
-
-vector<vector<double>> Distance::distance2bbox(const vector<vector<double>>& points, const vector<vector<double>>& distance, const vector<int>& max_shape) {
-    vector<vector<double>> result(points.size(), vector<double>(4));
-
-    for (size_t i = 0; i < points.size(); ++i) {
-        double x1 = points[i][0] - distance[i][0];
-        double y1 = points[i][1] - distance[i][1];
-        double x2 = points[i][0] + distance[i][2];
-        double y2 = points[i][1] + distance[i][3];
-
-        if (!max_shape.empty()) {
-            x1 = min(max(x1, 0.0), static_cast<double>(max_shape[1]));
-            y1 = min(max(y1, 0.0), static_cast<double>(max_shape[0]));
-            x2 = min(max(x2, 0.0), static_cast<double>(max_shape[1]));
-            y2 = min(max(y2, 0.0), static_cast<double>(max_shape[0]));
-        }
-
-        result[i][0] = x1;
-        result[i][1] = y1;
-        result[i][2] = x2;
-        result[i][3] = y2;
-    }
-
-    return result;
-}
-
-vector<vector<double>> Distance::distance2kps(const vector<vector<double>>& points, const vector<vector<double>>& distance, const vector<int>& max_shape) {
-    vector<vector<double>> preds;
-
-    for (size_t i = 0; i < distance[0].size(); i += 2) {
-        vector<double> px(points.size());
-        vector<double> py(points.size());
-
-        for (size_t j = 0; j < points.size(); ++j) {
-            px[j] = points[j][i % 2] + distance[j][i];
-            py[j] = points[j][(i + 1) % 2] + distance[j][i + 1];
-
-            if (!max_shape.empty()) {
-                px[j] = min(max(px[j], 0.0), static_cast<double>(max_shape[1]));
-                py[j] = min(max(py[j], 0.0), static_cast<double>(max_shape[0]));
-            }
-        }
-
-        preds.push_back(px);
-        preds.push_back(py);
-    }
-
-    vector<vector<double>> result(points.size(), vector<double>(distance[0].size()));
-    for (size_t i = 0; i < points.size(); ++i) {
-        for (size_t j = 0; j < distance[0].size(); ++j) {
-            if (j % 2 == 0)
-                result[i][j] = preds[j][i];
-            else
-                result[i][j] = preds[j][i];
-        }
-    }
-
-    return result;
-}
-

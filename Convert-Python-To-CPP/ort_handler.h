@@ -46,8 +46,6 @@ namespace core
 
         BasicOrtHandler& operator=(BasicOrtHandler&&) = delete;
 
-    protected:
-        virtual Ort::Value preprocessing(const cv::Mat& mat) = 0;
 
     private:
         void initialize_handler();

@@ -35,11 +35,10 @@ void BasicOrtHandler::initialize_handler()
     session_options.SetLogSeverityLevel(4);
 
     // GPU compatiable.
-    // OrtCUDAProviderOptions provider_options;
-    // session_options.AppendExecutionProvider_CUDA(provider_options);
-#ifdef USE_CUDA
-    OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0); // C API stable.
-#endif
+     OrtCUDAProviderOptions provider_options;
+     provider_options.device_id = 0;
+     session_options.AppendExecutionProvider_CUDA(provider_options);
+
   // 1. session
     ort_session = new Ort::Session(ort_env, onnx_path, session_options);
 

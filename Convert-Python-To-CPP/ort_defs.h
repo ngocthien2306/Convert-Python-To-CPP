@@ -24,8 +24,6 @@
 #  endif
 #endif
 
-#ifdef ENABLE_ONNXRUNTIME_CUDA
 # define USE_CUDA
-#endif
 
 #endif //LITE_AI_ORT_CORE_ORT_DEFS_H
